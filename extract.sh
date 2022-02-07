@@ -10,3 +10,8 @@ do
   rm temp.c
   popd
 done
+
+for i in dir_*
+do 
+  mv $i `echo $i | sed -e 's/dir_//g' | sed -e 's/\.f90//g'`
+done
