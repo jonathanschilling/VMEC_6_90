@@ -1,0 +1,8 @@
+ &namin17
+ rx1=1.5, rx2=4.0, zy1=-1.4, zy2=1.4, 
+ nrgrid=60, nzgrid=60, condif=50., 
+ &end
+ &namin18
+ rx1=.6, rx2=5.0, zy1=-2.88, zy2=2.88, 
+ nrgrid=60, nzgrid=60, condif=50., 
+ &end
