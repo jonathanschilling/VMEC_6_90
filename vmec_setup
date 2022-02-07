@@ -1,0 +1,1149 @@
+#!/bin/sh
+#Written by S. P. Hirshman, with lots of help from friends...
+#
+#                           M A I N   D I R E C T O R Y ( V M E C , T Y P I C A L L Y)
+#                     
+#------------------------------------------------------------------------------------------------------------------------------------
+#                      |           vmec_setup => makes all directories, makefiles    |        |         |        |         |       |
+#                      |                                                             |        |         |        |         |       |
+#                      |            |           |            |           |           |        |         |        |         |       |
+#                      |            |           |            |           |           |        |         |        |         |       |
+#                  LIB_OPT      VMEC_CODE    STELLOPT   BOOZ_XFORM    NESCOIL      BNORM    BOOTSJ   J_INVAR    PROUT  PGPROUT  BD_MATCH
+#                  ---------    ---------  ----------    -------       -----       -----    ------   -------    -----  -------  _______ 
+#  make release => libstopt       xvmec      xstellopt    xbooz        xcoil      xbnorm   xbootsj xj_invariant xprout
+#                             |            |            |           |         |        |          
+#                             |            |            |           |         |        |
+#                             |            |            |           |         |        |
+#                             |            |            |           |         |        |
+#                            DKES         COBRA      MAKEGRID    COILOPT    COILGEOM  PGPROUT
+#                            ----         -----      -------     -------    -------   -------
+#                            xdkes,      xcobra,      xgrid      xcoilopt  xcoilgeom  xpgprout
+#                          xdkes_prep  xcobravmec
+#
+
+#User only gets these archives (and vmec_auxmod.f90) in that case
+
+#Identify platform
+uname -a | grep AIX    && computer=risc6000
+uname -a | grep CRAY   && computer=cray
+uname -a | grep ULTRIX && computer=decstation
+uname -a | grep IRIX   && computer=ccf
+uname -a | grep IRIX64 && computer=orig2000
+uname -a | grep OSF1   && computer=osf1
+uname -a | grep HP-UX  && computer=HPUX
+uname -a | grep Linux  && computer=linux
+uname -a | grep SunOS  && computer=sunhelio3
+uname -a | grep SX-5   && computer=SX-5
+
+MY_HOME=$HOME/bin
+MACHINE_ID=`uname -n`
+#[ "$MACHINE_ID" = "falcon0" ] && MY_HOME=$HOME"/falcon"
+
+if [ $computer = "linux" ]
+then
+	lnx_cluster=" "
+	uname -n | grep pppl.gov  && lnx_cluster="pppl"
+fi
+
+ECHO="echo"
+[ $computer = "linux" ] && ECHO="echo -e"
+$ECHO 'Enter version type to make (release-R, debug-D) : \c'
+read v_in
+input=`echo $v_in | tr "[:lower:]" "[:upper:]"`
+if [ $input = 'D' ]
+then
+   VERSION="debug"
+else
+   VERSION="release"
+fi      
+
+$ECHO 'Specify module(s) to make: (all bd_match booz_xform bootsj bnorm cobra cobravmec coilgeom coilopt diagno'
+$ECHO '                            dkes j_invariant lib makegrid neo nescoil prout pgprout stellopt vmec vmec2000): \c'
+read v_in
+files_to_make=`echo $v_in | tr "[:upper:]" "[:lower:]"`
+if [ "$files_to_make" = "all" ]
+then
+   files_to_make="bd_match booz_xform bootsj bnorm cobra cobravmec coilgeom coilopt4 diagno dkes j_invariant makegrid neo nescoil \
+   prout pgprout vmec vmec2000 stellopt"
+elif [ "$files_to_make" = "lib" ]
+then
+   files_to_make=""
+fi   
+
+[ "$files_to_make" = "coilopt" ] && files_to_make="coilopt4"
+
+$ECHO 'Specify a CLEAN MAKE (remakes existing .o files, even if they are not out of date)'
+$ECHO 'or an ORDINARY MAKE (default) - (C/O): \c'
+read v_in
+if [ "$v_in" = 'c' ] || [ "$v_in" = 'C' ]
+then
+   CLEAN="clean"
+else
+   CLEAN="dirty"
+fi   
+
+echo Script for generating STELLARATOR OPTIMIZATION SUITE executables
+
+
+#Set various C-preprocessor commands for VMEC, etc...
+symmetry_mode="symmetric"	#"symmetric" for up-down or stellarator symmetry
+                        	#"asymmetric" for general symmetry
+profiles="continuous"		#""for no reconstruction only
+                                #"discrete" to read in data
+                                #"continuous" to use power series
+#---------------------------------------------------------------
+# Define the Platform Type on which the computation is to be done ...
+echo "  Computer = $computer"
+#---------------------------------------------------------------
+if [ $symmetry_mode = "symmetric" ]
+then
+	d4=""
+else
+	d4="-DASYM"
+fi
+if [ "$profiles" = "discrete" -a "$reconstruction" = "no" ]
+then
+	d6="-DDISCF"
+        OBJDISCF="splines.o "
+else
+	d6=""
+        OBJDISCF=" "
+fi
+        dall="$d4 $d6"
+	FLAGS_R=""
+	FLAGS_D="-g"
+	FLAGS_C_R=""
+	FLAGS_C_D="-g"
+	PRINTFLAG="-O"
+	LINK="f90"
+	MPI_LINK=""
+	MPI_COMPILE=""
+	MPI_RUN=""
+	MPI_LIB=""
+	LIBDIR_R="$MY_HOME/vmec_lib_release"
+	LIBDIR_D="$MY_HOME/vmec_lib_debug"
+	MODULE_PATH_R="-I. -I$LIBDIR_R"
+	MODULE_PATH_D="-I. -I$LIBDIR_D"
+	COPYMOD_R=""
+	SAVEMOD_R=""
+	COPYMOD_D=""
+	SAVEMOD_D=""
+	ARCHIVE="ar -ruv"
+	COMPILE="f90"
+	NCARGSYM="f90 $NCAR"
+	NCARGLIB=""
+	LIB=""
+	FREE_FORM=""
+        PGPLOT_DIR=""
+	MKDIR="mkdir -m 755"
+	MAKE_DEPEND="\${\$(@):.o=.f}"
+	MAKE_DEPEND_C="\${\$(@):.o=.c}"
+	processors_per_node=1
+
+if [ ! -z "$PGPLOT_DIR" ] 
+then
+        PGLIB="-L$PGPLOT_DIR -lpgplot -lX11 -lg2c"
+#elif [ -f /usr/local/pgplot/libpgplot.a ] 
+#then
+#       PGLIB="-L/usr/local/pgplot -lpgplot -lX11"
+else
+        echo "  Cannot find PGPLOT_DIR: will not be able to make pgprout!"
+        echo "  Cannot find PGPLOT_DIR: will not be able to make bd_match!"
+fi
+if [ $computer = "risc6000" ]
+then
+  PGLIB=$PGLIB"  -lpng -lz "
+fi
+if [ $lnx_cluster = "pppl" ]
+then
+
+  PGLIB="$PGPLOT_DIR/libpgplot.a -L/usr/X11R6/lib  -lX11 "
+ 
+fi
+
+
+if [ ! -z "$PGPLOT_DIR" ] 
+then
+	PGLIB="-L$PGPLOT_DIR -lpgplot -lX11"
+hinv | grep R10000  &&  PGLIB="-L /am/father/u0/lazarus/pgplot/mypgplot \
+-lpgplot64 -lX11"
+elif [ -f /usr/local/pgplot/libpgplot.a ] 
+then
+	PGLIB="-L/usr/local/pgplot -lpgplot -lX11"
+else
+	echo "  Cannot find PGPLOT_DIR: will not be able to make pgprout!"
+fi
+if [ $computer = "risc6000" ]
+then
+PGLIB=$PGLIB"  -lpng -lz "
+fi
+
+case $computer in
+winnt)
+	precomp="cc -C -P -w -DWINNT $dall temp.c"
+	;;
+cray) 
+if [ $MACHINE_ID = "lonestar" ]
+then
+	precomp="cc -C -P -DCRAY -DLONESTAR $dall temp.c"
+	FLAGS_R="-O3 "
+elif [ $MACHINE_ID = "mcurie" ]
+then
+	precomp="cc -C -P -DCRAY -DMCURIE $dall temp.c"
+	FLAGS_R="-Oscalar3,vector3"
+	FLAGS_C_R="-Oscalar3,vector3"
+	MPI_RUN="mpirun -np \$2 \$MY_HOME/xstellopt \$1"
+	LINK='f90 -Wl"-D permok=yes"'
+else
+	precomp="cc -C -P -DCRAY $dall temp.c"
+	FLAGS_R="-Oscalar3,vector3,task2"
+	FLAGS_C_R="-Oscalar3,vector3,task2"
+	MPI_RUN="mpirun -np \$2 \$MY_HOME/xstellopt \$1"
+fi
+	FLAGS_D="-e D -e I"        
+	FREE_FORM="-f free"
+        NCARGSYM="f90 -O 3 $NCAR "
+	MODULE_PATH_R="-p . -p $LIBDIR_R"
+	MODULE_PATH_D="-p . -p $LIBDIR_D"
+	;;
+risc6000)
+#put all single-processor machines FIRST...
+if [ $MACHINE_ID = "hirshman" ] || [ $MACHINE_ID = "fedu55" ] || 
+   [ $MACHINE_ID = "jaeger" ] 
+then
+	LIB="-lblas"
+else
+#	MPI_COMPILE="mpxlf90_r -qfixed"
+#	MPI_LINK="mpxlf90_r -bnoquiet"
+#	MPI_RUN="poe xstellopt \$1 -procs \$2 -tasks_per_node \$proc_per_node -nodes \$numnodes -rmpool 1"
+      processors_per_node=16
+	[ `echo $MACHINE_ID | grep eagle` ] && processors_per_node=4
+	LIB="-lessl -lblas"
+fi
+	trap="-C -qinit=f90ptr -qinitauto=FF -bnoquiet -qnosave -qspnans \
+-qflttrap=zero:ov:inv:en -qsigtrap -qextchk"
+#	FREE_FORM="-qfree=f90 -qrealsize=8"
+	FREE_FORM="-qfree=f90"
+	FLAGS_R="-qnolm -O4 -qstrict -qnoipa"
+	FLAGS_D="-qnolm -g $trap"
+	precomp="cc -C -P -w -DRISC $dall temp.c"
+	COMPILE="xlf90 -qfixed"
+	LINK="xlf90 -bnoquiet"
+	FLAGS_R_DKES=$FLAGS_R
+	FLAGS_R=$FLAGS_R" -qalias=noaryovrlp"
+	FLAGS_C_R="-qnolm -O4 -qnoipa"
+	FLAGS_C_D="-qnolm -g"
+	NCARGSYM="ncargf77"
+	;;
+ccf)
+	precomp="cc -P -DIRIX $dall temp.c"
+	FLAGS_R="-O"
+	FLAGS_C_R="-O"
+	FLAGS_C_D="-O"
+	;;
+orig2000)
+	precomp="cc -P -ansi -DIRIX64 $dall temp.c"
+	FREE_FORM="-freeform"
+        for platforms in IP19 IP20 IP21 IP22_4K IP22_5K \
+                         IP24 IP25 IP26 IP27 IP28 IP30 IP32_5K IP32_10K
+        do
+           hinv -c processor | grep $platforms && platform=$platforms
+        done      
+
+        for processors in 4000 5000 8000 10000 12000
+        do
+  	   hinv -c processor | grep $processors && PROCESSOR=" -r"$processors
+        done
+
+        FLAGS_R="-64 -mips4"$PROCESSOR" -TARG:platform=$platform -Ofast=$platform -IPA \
+-LNO:vintr=on -OPT:alias=disjoint:fast_nint=off:roundoff=0:cray_ivdep=on"
+#        FLAGS_R_DKES="-64 -mips4"$PROCESSOR" -TARG:platform=$platform -O2 \
+#-LNO:vintr=on -OPT:Olimit=0:alias=disjoint:fast_nint=off:roundoff=0:cray_ivdep=on"
+	FLAGS_D="-g -C"
+	FLAGS_C_R="-64 -O"
+	FLAGS_C_D="-g"
+	LIB="-lfastm -lblas"
+	NCARGSYM="f90 "$FLAGS_R
+	NCARGLIB="-L/usr/pppl/lib -lncarg -lncarg_gks -lncarg_c -lX11"
+#	MPI_RUN="mpirun -np \$2 xstellopt \$1"
+#	MPI_LIB=$LIB" -lmpi"
+	;;
+osf1)
+if [ $MACHINE_ID = "infinity.physics.umt.edu" ]
+then
+	precomp="cc -oldc -C -P -o temp.i -DLANGUAGE_FORTRAN -DOSF1 $dall temp.c"
+elif [ $MACHINE_ID = "falcon0" ]
+then
+	precomp="cc -C -P -o temp.i -DLANGUAGE_FORTRAN -DOSF1 -DFALCON $dall temp.c"
+	MPI_RUN="prun -N \$numnodes -n \$2 xstellopt \$1"
+	MPI_LIB=$LIB"-lcxml -lmpi -lelan"
+	processors_per_node=4
+else
+	precomp="cc -C -P -o temp.i -DLANGUAGE_FORTRAN -DOSF1 $dall temp.c"
+fi
+	LIB="-ldxml"
+	FLAGS_R="-O5 -speculate all -transform_loops -fast -tune host"
+	FLAGS_C_R="-O5 -speculate all -transform_loops"
+	FLAGS_D="-g -ladebug -check bounds"
+	FLAGS_C_D="-g -ladebug -check bounds"
+	FREE_FORM="-free"
+	NCARGLIB="-L/usr/local/lib -lncarg -lncarg_gks -lncarg_c -lX11"
+if [ $MACHINE_ID = "uscws8.gat.com" ]
+then
+	FLAGS_R="-O5 -speculate all -transform_loops -tune host"
+fi
+	;;
+HPUX)
+if [ $MACHINE_ID = "gate3" ]
+then
+	precomp="cc -P -DHPUX -DNEED_BLAS $dall temp.c"
+      FREE_FORM="-f4"
+	FLAGS_R="-Chopt -sx5 -Wf,-M noflovf"
+	FLAGS_C_R="-Chopt"
+	FLAGS_D="-g"
+	COMPILE="sxf90"
+	LINK="sxf90 -sx5"
+	ARCHIVE="sxar -ruv"
+else
+	precomp="cc -P -DHPUX $dall temp.c"
+	FLAGS_R="-O +U77 +FPdiuOVZ +FPdiuOVZ"
+	FLAGS_C_R="-O +U77 +FPdiuOVZ +FPdiuOVZ"
+	FLAGS_D="-g +U77 +FPdiuOVZ +FPdiuOVZ"
+	PRINTFLAG="+O3 +U77 +FPdiuOVZ"
+	LINK="f90 +U77 +FPdiuOVZ +FPdiuOVZ"
+fi
+	;;
+linux)
+	FREE_FORM="-free"
+	lnx_cluster=" "
+	uname -n | grep pppl.gov  && lnx_cluster="pppl"
+
+if [ $MACHINE_ID = "fedalbert" ] || [ $MACHINE_ID = "kiwi.fed.ornl.gov" ]
+then 
+      COMPILE="lf95"
+      LINK="lf95 --staticlink"
+      FREE_FORM="--nfix"
+	FLAGS_R="-O"
+elif [ $MACHINE_ID = "sherlock" ]
+then
+      COMPILE="lf95"
+      LINK="lf95"
+	FLAGS_R="-O5"
+elif [ $lnx_cluster = "pppl" ]
+then
+      echo $F90HOME | grep lff95 && lnx_compil='lf'
+      echo $F90HOME | grep pathscale && lnx_compil='path'
+      echo $F90HOME | grep pgi && lnx_compil='pgf'
+      COMPILE="mpif90"
+      FLAGS_R="-O"
+      if [ $lnx_compil = "lf" ]
+      then
+          LINK="mpif90 --staticlink"
+          FREE_FORM="--nfix"
+          FLAGS_R="--o2 -X9"
+#          FLAGS_D="-g --chk a,e,s,u --chkglobal "
+          FLAGS_D="-g --chk a,e,s,u,x --chkglobal "
+      elif [ $lnx_compil = "path" ]
+      then
+          LINK="mpif90 -static"
+          FREE_FORM="-freeform"
+#          FLAGS_R="-Wall -O2 -fno-second-underscore -fno-underscoring -fno-unsafe-math-optimizations"
+          FLAGS_R="-Wall -O2 -fno-unsafe-math-optimizations"
+          FLAGS_D="-Wall -g2 -ffortran-bounds-check  -fno-second-underscore -fno-underscoring -fno-unsafe-math-optimizations"
+      elif [ $lnx_compil = "pgf" ]
+      then
+          LINK="mpif90 -Bstatic"
+          FREE_FORM="-Mfree"
+#           FLAGS_R="-O2 -fast"
+           FLAGS_R="-O3 -fast -Kieee"
+           FLAGS_D=" -C -g -Mbounds -Mchkfpstk -Mchkptr -Mchkstk -Mcoff -Mdwarf1  -Mdwarf2 -Melf -Mpgicoff -Mstabs -Kieee"
+      fi   
+        MPI_RUN="mpirun -np \$2 \$MY_HOME/xstellopt \$1"
+else
+	COMPILE="f90"
+	LINK="f90"
+	FLAGS_R="-O5 -fast"
+fi
+	precomp="gcc -E -C -P -traditional -o temp.i -DLINUX -DNEED_BLAS $dall temp.c"
+	FLAGS_C_R="-O"
+	uname -n | grep sherlock && FLAGS_R="-O5 -arch ev56"
+	PRINTFLAG="-O5"
+#GNU-MAKE:
+	MAKE_DEPEND="%.o: %.f"
+	MAKE_DEPEND_C="%.o: %.c"
+	;;
+SX-5)
+	precomp="cc -P -DSX5 -USX -U_SX $dall temp.c"
+	LIB="-lblas"
+        FREE_FORM="-f4"
+	FLAGS_R="-Chopt"
+	FLAGS_D="-g"
+	FLAGS_C_R=""
+	FLAGS_C_D="-g"
+	;;
+sunhelio3)
+	precomp="cc -C -P -Xs -DSUNOS $dall temp.c"
+	LIB="-xlic_lib=sunperf"
+        FREE_FORM="-free"
+	FLAGS_R="-fast -O5 -dalign -xlibmopt"
+	FLAGS_C_R="-fast -O5 -xlibmopt"
+	PRINTFLAG="-O5"
+	MODULE_PATH_R="-M. -M$LIBDIR_R"
+	MODULE_PATH_D="-M. -M$LIBDIR_D"
+	;;
+axpvms)			#assume precompilation done on UNIX system
+     	precomp="cc -C -P -w -DVMS -DAXPVMS $dall temp.c"
+	;;
+vaxornl) 		#assume precompilation done on UNIX system
+     	precomp="cc -C -P -w -DVMS $dall temp.c"
+	;;
+esac
+
+precomp_nompi=$precomp
+[ -n "$MPI_RUN" ] && precomp=$precomp" -DMPI_OPT"
+
+START_DIR=`pwd`
+#MODLIB => module files on which files depend
+
+#begin for-do loop over files_to_make  
+#note: lib MUST be first for this to work properly...
+
+for files in lib $files_to_make
+do
+  DIR=`echo $files | tr "[:lower:]" "[:upper:]"`
+  COMPILE1=$COMPILE
+  LINK1=$LINK
+  LIB1=$LIB
+  cd $START_DIR
+    
+  case $files in
+  lib)   DIR="LIB_OPT"
+         [ -n "$MPI_COMPILE" ] && COMPILE1=$MPI_COMPILE  
+         [ -n "$MPI_LINK" ] && LINK1=$MPI_LINK  
+  ;;
+  vmec)  DIR="VMEC_CODE"
+         MODDEP="read_namelist_mod safe_open_mod vparams vmec_input vmec_seq vsvd0"
+  ;;
+  vmec2000)  
+         MODDEP="read_namelist_mod safe_open_mod vparams vmec_input vmec_seq vsvd0"
+  ;;
+  bnorm)  MODDEP="read_wout_mod safe_open_mod"
+  ;;
+  bootsj) MODDEP="read_boozer_mod read_namelist_mod safe_open_mod"
+  ;;
+  booz_xform)  MODDEP="read_wout_mod safe_open_mod"
+  ;;
+#  btrace)  MODDEP="safe_open_mod"
+#  ;;
+  cobra)  MODDEP="read_boozer_mod safe_open_mod"
+  ;;
+  cobravmec)  MODDEP="read_wout_mod safe_open_mod"
+  ;;
+  coilopt4)  
+         DIR="COILOPT"
+         MODDEP="kind_spec cparms"
+         [ -n "$MPI_COMPILE" ] && COMPILE1=$MPI_COMPILE  
+         [ -n "$MPI_LINK" ] && LINK1=$MPI_LINK
+         [ -n "$MPI_LIB" ] &&  LIB1=$MPI_LIB
+  ;;
+  coilgeom) 
+         DIR="COILGEOM"
+         MODDEP="kind_spec cparms"
+  ;;
+  diagno) MODDEP=" "
+  ;;
+  dkes)   MODDEP="read_boozer_mod read_wout_mod safe_open_mod"
+  ;;
+  j_invariant)  MODDEP="read_boozer_mod safe_open_mod"
+  ;;
+  makegrid)  DIR="MAKEGRID"
+          MODDEP="kind_spec"
+  ;;
+  neo)    MODDEP=" "
+  ;;
+  nescoil) MODDEP="safe_open_mod"
+  ;;
+  stellopt)
+         MODDEP="read_boozer_mod read_namelist_mod vparams vmec_input bootsj_input \
+         read_wout_mod optim_params system_mod safe_open_mod ga_mod de_mod gade_mod ajax_mod"
+         [ -n "$MPI_COMPILE" ] && COMPILE1=$MPI_COMPILE  
+         [ -n "$MPI_LINK" ] && LINK1=$MPI_LINK
+         [ -n "$MPI_LIB" ] && LIB1=$MPI_LIB
+  ;;
+  prout) DIR="PLOTTER"
+         MODDEP="read_wout_mod safe_open_mod"  
+  ;;  
+  pgprout) DIR="PGPROUT"
+         MODDEP="read_wout_mod safe_open_mod"  
+  ;;  
+  bd_match) DIR="BD_MATCH"
+         MODDEP="read_wout_mod safe_open_mod"  
+  ;;  
+  esac
+
+
+#Build (concatenate) module file dependency list 
+  MODLIB_R=""
+  MODLIB_D=""
+  for var in $MODDEP
+  do
+     MODLIB_R=$MODLIB_R"\$(LIB_R)/$var.o "
+     MODLIB_D=$MODLIB_D"\$(LIB_D)/$var.o "
+  done
+  
+
+#Make directory tree structure of LIB and OPTIMIZATION routines
+  if [ ! -d ./$DIR ]
+  then
+    if [ -f ./$files.f90 ] || [ $files = "lib" ] || [ $files = "coilgeom" ]
+    then
+      echo "  Creating new directory '"$DIR"'"
+      $MKDIR ./$DIR
+    else
+      continue
+    fi    
+  fi  
+
+
+   if [ $files = "coilgeom" ]
+   then
+      PWD=`pwd`
+      [ ! -f ./coilopt4.f90 ] && [ -f ./COILOPT/coilopt4.f90 ] && ln -s $PWD/COILOPT/coilopt4.f90 coilgeom.f90
+      [ -f ./coilopt4.f90 ] && ln -s $PWD/coilopt4.f90 coilgeom.f90
+   fi
+
+#Create runopt script and put it into STELLOPT directory
+  if [ "$MPI_RUN" != "" ]
+  then
+     if [ $files = "stellopt" ]
+     then    
+        cd ./$DIR
+        [ -f runopt ] && rm runopt
+        echo "#!/bin/sh" > runopt
+        echo "#USAGE: runopt \$1 \$2" >> runopt
+        echo "#\$1: name of input file" >> runopt
+        echo "#\$2: number of processors requested" >> runopt
+        echo "if [ ! -n \"\$2\" ]" >> runopt
+        echo "then" >> runopt
+        echo "echo \"Usage: runopt <filename> <no processors>\"" >> runopt
+        echo "exit [0]" >> runopt
+        echo "fi" >> runopt
+        
+        echo $MPI_RUN | grep nodes > /dev/null; TestIt=$?
+        if [ $TestIt = "0" ]
+        then
+           echo "if [ \"\$2\" -lt $processors_per_node ]" >> runopt
+           echo "then" >> runopt
+           echo "   proc_per_node=\$2" >> runopt
+           echo "else" >> runopt
+           echo "   proc_per_node=$processors_per_node" >> runopt
+           echo "fi" >> runopt
+           echo "ppn1=\`expr \$proc_per_node - 1\`" >> runopt
+           echo "numnodes=\`expr \$2 + \$ppn1\`" >> runopt
+           echo "numnodes=\`expr \$numnodes / \$proc_per_node\`" >> runopt
+        fi   
+        echo $MPI_RUN >> runopt
+        echo ""
+        echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        echo "  Use runopt script to execute xstellopt code"
+        echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        echo ""
+        chmod u+x runopt
+        rm -f $MY_HOME/runopt
+        PWD=`pwd`
+        ln -fs $PWD/runopt $MY_HOME/runopt
+        cd ..
+     fi
+  fi
+
+#Move Fortran sources to associated directory  
+  if [ $files = "lib" ] 
+  then
+#Move f90vsplit .f file and library .f90 files to library directory
+    [ -f ./f90vsplit.f ] && mv -f ./f90vsplit.f $DIR
+    for lib in lapack vmec_auxmod fftpack svdpack miscel lev_opt ga_opt de_opt coilslib lsode legendre ajax
+    do
+       [ -f ./$lib.f90 ] && mv -f ./$lib.f90 $DIR
+    done
+  else 
+    [ -f ./$files.f90 ] && mv -f ./$files.f90 $DIR
+  fi
+
+
+#Create make files in individual directories
+  cd ./$DIR
+  echo "  Creating make file in directory '"$DIR"'"
+  MAKEFILE=make$files
+  [ $files = "makegrid" ] && MAKEFILE="makemgrid"
+  
+  if [ $files = "lib" ]
+  then
+     EXE_FILE="libstopt.a"
+     LINK_FILE=$ARCHIVE
+     MOD_R=""
+     MOD_D=""
+  else
+     EXE_FILE="x"$files
+     [ $files = "makegrid" ] && EXE_FILE="xgrid"
+     [ $files = "coilopt4" ] && EXE_FILE="xcoilopt"
+     LINK_FILE=$LINK1" \$(FLAGS) -o"
+     LIBRARY="libstopt.a"
+     LIB_RULE="libstopt.a"
+     LINK_LIB="$LIB1 "$MY_HOME/libstopt.a
+     [ $MACHINE_ID = "himiko" ] && LINK_LIB=$MY_HOME/libstopt.a" $LIB1"
+     MOD_R=$MODULE_PATH_R
+     MOD_D=$MODULE_PATH_D
+  fi   
+
+  [ $files = "prout" ] && LINK_FILE=$NCARGSYM" -o"
+  [ $files = "prout" ] && LINK_LIB=$LINK_LIB" $NCARGLIB"
+  [ $files = "pgprout" ] && LINK_LIB=$LINK_LIB" $PGLIB"
+  [ $files = "bd_match" ] && LINK_LIB=$LINK_LIB" $PGLIB"
+
+  FLAGS_R0=$FLAGS_R
+  FLAGS_D0=$FLAGS_D
+  [ $files = "neo" ] && FLAGS_R0=$FLAGS_R" "$FREE_FORM 
+  [ $files = "neo" ] && FLAGS_D0=$FLAGS_D" "$FREE_FORM
+  [ $files = "diagno" ] && FLAGS_R0=$FLAGS_R" "$FREE_FORM 
+  [ $files = "diagno" ] && FLAGS_D0=$FLAGS_D" "$FREE_FORM
+# Special: DKES subroutine ftconv does not run with Ofast switch or -IPA (fixed 01/01)
+# [ $files = "dkes" ] && [ $computer = "orig2000" ] && FLAGS_R0=$FLAGS_R_DKES
+# DKES A = TRANSP(A) fails with noaryovrlp flag (fixed in latest version)
+# [ $files = "dkes" ] && [ $computer = "risc6000" ] && FLAGS_R0=$FLAGS_R_DKES
+  
+  BANNER_REL="Beginning release compilation and linking of $files"
+  BANNER_DBG="Beginning debug compilation and linking of $files"
+  if [ $files = "lib" ]
+  then
+     BANNER_REL="Beginning release compilation and archiving of $files"
+     BANNER_DBG="Beginning debug compilation and archiving of $files"
+  fi
+
+#Create Makefile in $DIR directory
+cat > makefile << EOF
+#Type "make release(debug)" at command line to make release(debug) version  
+#DO NOT alter the directory structure or move this makefile (must be in top level dir)
+  SHELL = /bin/sh
+  DBG = Vdebug
+  REL = Vrelease
+  PWD = \`pwd\`
+  EXE_R = $EXE_FILE
+  EXE_D = $EXE_FILE
+  MAKE = $MAKEFILE
+  MYHOME = $MY_HOME
+  SRC_DIR = ../vsource
+  MOD_DIR = ../vmodules
+  TMP=\$(TMPDIR)
+  LIB_R=$LIBDIR_R
+  LIB_D=$LIBDIR_D
+
+#Use ln -s to establish symbolic links to source and modules directory .f, .c files
+#Note: -(...) allows make to continue even if there is an error code...
+#The ":" at the end prevents a non-zero error code from being written to screen
+
+release:
+	@echo "$BANNER_REL"
+	@-(cd \$(REL); ls \$(SRC_DIR)/*.f > /dev/null && ln -s \$(SRC_DIR)/*.f .; :) 2> /dev/null
+	@-(cd \$(REL); ls \$(SRC_DIR)/*.c > /dev/null && ln -s \$(SRC_DIR)/*.c .; :) 2> /dev/null
+	@-(cd \$(REL); ls \$(MOD_DIR)/*.f > /dev/null && ln -s \$(MOD_DIR)/*.f .; :) 2> /dev/null
+	@cd \$(REL); $COPYMOD_R
+	@cd \$(REL); make -f \$(MAKE) \$(EXE_R) FLAGS_C="$FLAGS_C_R" \
+	FLAGS="$FLAGS_R0 $MOD_R" MODLIB_DEP="$MODLIB_R" TYPE="release"
+	@rm -f \$(MYHOME)/\$(EXE_R); $SAVEMOD_R
+	@-(umask 022; ln -s \$(PWD)/\$(REL)/\$(EXE_R) \$(MYHOME) 2> /dev/null; umask 077)
+	@echo "Release version - $EXE_FILE - is now updated"
+	@echo "To free up space, delete all *.o files from Vrelease"
+	@echo ""
+
+debug:
+	@echo "$BANNER_DBG"
+	@-(cd \$(DBG); ls \$(SRC_DIR)/*.f > /dev/null && ln -s \$(SRC_DIR)/*.f .; :) 2> /dev/null
+	@-(cd \$(DBG); ls \$(SRC_DIR)/*.c > /dev/null && ln -s \$(SRC_DIR)/*.c .; :) 2> /dev/null
+	@-(cd \$(DBG); ls \$(MOD_DIR)/*.f > /dev/null && ln -s \$(MOD_DIR)/*.f .; :) 2> /dev/null
+	@cd \$(DBG); $COPYMOD_D
+	@cd \$(DBG); make -f \$(MAKE) \$(EXE_D) FLAGS_C="$FLAGS_C_D" \
+	FLAGS="$FLAGS_D0 $MOD_D" MODLIB_DEP="$MODLIB_D" TYPE="debug" 
+	@rm -f \$(MYHOME)/\$(EXE_D); $SAVEMOD_D 
+	@-(umask 022; ln -s \$(PWD)/\$(DBG)/\$(EXE_D) \$(MYHOME) 2> /dev/null; umask 077)
+	@echo "Debug version - $EXE_FILE - is now updated"
+	@echo "To free up space, delete all *.o files from Vdebug"
+	@echo ""
+
+clean_release: 
+	@echo "CLEAN REMAKE IN PROGRESS"
+	@cd \$(REL); make -f \$(MAKE) clean
+	@make release
+
+clean_debug: 
+	@echo "CLEAN REMAKE IN PROGRESS"
+	@cd \$(DBG); make -f \$(MAKE) clean
+	@make debug
+EOF
+
+if [ $files != "lib" ]
+then
+cat > $MAKEFILE << EOF
+#This makefile goes in dirs Vdebug and Vrelease (first level below $DIR)
+SHELL   = /bin/sh
+SRC_DIR = ../vsource
+MOD_DIR = ../vmodules
+LIB_DIR = ../../LIB_OPT
+LISTS   = ../Vlist
+COMPILE = $COMPILE1
+LINK    = $LINK_FILE
+LIB_LINK= $LINK_LIB
+LIB     = $LIBRARY
+LIB_RUL = $LIB_RULE
+
+#Defines vsource.Sub (list of source files.o)
+include \$(LISTS)/vsource.lst                  
+include \$(LISTS)/vmodules.lst
+
+$EXE_FILE:  \$(LIB) \$(vmodules.Sub) \$(vsource.Sub) 
+	\$(LINK) \$@ \$(vmodules.Sub) \$(vsource.Sub) \$(LIB_LINK)
+
+#Compile module and corresponding object files.
+#Note: ':' is added to set error code from make to zero
+
+
+#Compile module .o files
+\$(vmodules.Sub) : $MAKE_DEPEND \$(MODLIB_DEP)
+	\$(COMPILE) \$(FLAGS) -c \$(@:.o=.f)
+
+#Compile source .o files
+\$(vsource.Sub) : $MAKE_DEPEND \$(vmodules.Sub)
+	\$(COMPILE) \$(FLAGS) -c \$(@:.o=.f)
+
+#Check that library files are current. 
+\$(LIB_RUL) :
+	@cd \$(LIB_DIR); make \$(TYPE)
+
+clean:
+	- rm -f *.o *.mod
+EOF
+
+else
+
+#Make Library makefile
+cat > $MAKEFILE << EOF
+#This makefile goes in dirs Vdebug and Vrelease (first level below $DIR)
+SHELL   = /bin/sh
+SRC_DIR = ../vsource
+MOD_DIR = ../vmodules
+LISTS   = ../Vlist
+COMPILE = $COMPILE1
+LINK    = $LINK_FILE
+#Modules with NO external dependency
+OBJ0 = kind_spec.o date_and_computer.o safe_open_mod.o system_mod.o vmec_seq.o control_mod.o
+#Modules which depend ONLY on kind_spec
+OBJ1 = vparams.o vsvd0.o bootsj_input.o read_boozer_mod.o \
+read_wout_mod.o fdjac_mod.o lmpar_mod.o cparms.o Vcoilpts.o modular_coils.o \
+vf_coils.o boundary.o tor_field.o bnorm_mod.o bcoils_mod.o saddle_coils.o \
+saddle_surface.o coilsnamin.o gade_mod.o de_mod.o ga_mod.o SPEC_KIND_MOD.o
+#Modules which depend ONLY on vparams, vsvd0
+OBJ2 = optim_params.o vmec_input.o
+#Modules with more complicated dependence
+OBJ3 = read_namelist_mod.o 
+OBJ4 = LINEAR1_MOD.o SPLINE1_MOD.o
+OBJ5 = ajax_mod.o
+OBJA = \$(OBJ0) \$(OBJ1) \$(OBJ2) \$(OBJ3) \$(OBJ4) \$(OBJ5)
+COBJ = cfuns.o
+
+#Defines vsource.Sub (list of source files.o)
+include \$(LISTS)/vsource.lst
+
+$EXE_FILE : \$(vsource.Sub) \$(OBJA) \$(COBJ)
+	\$(LINK) \$@ \$(vsource.Sub) \$(OBJA) \$(COBJ)
+
+#Compile Fortran source modules
+\$(OBJ0) : $MAKE_DEPEND
+	\$(COMPILE) \$(FLAGS) -c \$(@:.o=.f)
+\$(OBJ1) : $MAKE_DEPEND kind_spec.o
+	\$(COMPILE) \$(FLAGS) -c \$(@:.o=.f)
+\$(OBJ2) : $MAKE_DEPEND vparams.o vsvd0.o
+	\$(COMPILE) \$(FLAGS) -c \$(@:.o=.f)
+\$(OBJ3) : $MAKE_DEPEND vmec_input.o vmec_seq.o bootsj_input.o optim_params.o coilsnamin.o
+	\$(COMPILE) \$(FLAGS) -c \$(@:.o=.f)
+\$(OBJ4) : $MAKE_DEPEND SPEC_KIND_MOD.o
+	\$(COMPILE) \$(FLAGS) -c \$(@:.o=.f)
+\$(OBJ5) : $MAKE_DEPEND LINEAR1_MOD.o SPLINE1_MOD.o
+	\$(COMPILE) \$(FLAGS) -c \$(@:.o=.f)
+
+#Compile C source .o files
+\$(COBJ) : $MAKE_DEPEND_C
+	cc \$(FLAGS_C) -I../vsource -c \$(@:.o=.c)
+
+#Compile Fortran source .o files
+\$(vsource.Sub) : $MAKE_DEPEND \$(OBJA) 
+	\$(COMPILE) \$(FLAGS) -c \$(@:.o=.f)
+
+clean:
+	- rm -f *.o *.mod
+
+EOF
+fi
+
+TEMP_DIR=$files"_temp"
+echo "  Creating scratch directory '"$TEMP_DIR"'"
+[ -d ./$TEMP_DIR ] && rm -fr ./$TEMP_DIR 
+$MKDIR ./$TEMP_DIR
+
+# Expand source files (do in temp_dir)
+echo "  Precompiling $files code (C - precompiler)"
+cd ./$TEMP_DIR
+if [ -f ../$files.f90 ]
+then
+   set +x
+   cp ../$files.f90 .
+   chmod u+x ./$files.f90
+   ./$files.f90
+   if [ $files = "coilgeom" ]
+   then
+     temp_comp=$precomp_nompi" -DGEOM_ONLY"
+     $temp_comp
+   else
+     $precomp
+   fi
+elif [ $files = "lib" ]
+then
+   for lib0 in lapack vmec_auxmod fftpack svdpack miscel lev_opt ga_opt de_opt coilslib lsode legendre ajax
+#Additional libs go here, too
+   do
+     if [ -f ../$lib0.f90 ] 
+     then
+       set +x
+       cp ../$lib0.f90 .
+       chmod u+x ./$lib0.f90
+       ./$lib0.f90
+       $precomp
+       chmod u+x temp.i
+       ./temp.i
+#c code: DO NOT RUN THROUGH PREPROCESSOR
+       if [ -f temp_nopreprocess.c ]
+       then
+          chmod u+x ./temp_nopreprocess.c
+          ./temp_nopreprocess.c
+          rm -f ./temp_nopreprocess.c
+       fi   
+     fi
+   done
+   rm -f ./temp.i
+   rm -f ./temp.c
+fi
+
+#Still in TEMP_DIR...
+#Create *.f and *.inc files by running temp.i script (preprocessed temp.c file)
+if [ "$files" != "lib" ] && [ -f ./temp.i ]
+then
+  chmod u+x temp.i; ./temp.i
+  rm -f ./temp.i;  rm -f ./temp.c
+fi  
+
+echo "  Running $files Script to set up required directory tree"
+
+#Return up one level to parent directory to set up remainder of dir tree
+cd ..
+
+LISTS=Vlist
+echo "  Creating list directory"
+[ ! -d ./$LISTS ] && $MKDIR ./$LISTS
+
+echo "  Creating directories for release, debug object files and EXEC executables"
+[ ! -d ./Vdebug ] && $MKDIR ./Vdebug
+[ ! -d ./Vrelease ] && $MKDIR ./Vrelease
+if [ ! -d $MY_HOME ] 
+then
+   echo " "
+   $ECHO "  Do you wish to create $MY_HOME directory to store process executables (Y/N)? \c"
+   read PROCYN
+   if [ $PROCYN = 'y' ] || [ $PROCYN = 'Y' ]
+   then
+     echo "  Be sure to add $MY_HOME to your path!"
+     $MKDIR $MY_HOME
+   fi
+fi    
+
+#Install f90vsplit routine
+if [ $files = "lib" ]
+then
+   if [ ! -f $MY_HOME/f90vsplit ] || [ ! -f Vrelease/f90vsplit ]
+   then
+      if [ ! -f f90vsplit.f ] 
+      then
+         echo "  =============================================================="
+         echo "  f90vsplit.f file not found: VMEC build terminated prematurely"
+         echo "  =============================================================="
+         exit 1
+      fi
+      chmod u+x f90vsplit.f
+      temp1='s;$(TMP);'$TMPDIR';g'
+      NEWFLAG=`echo $FLAGS_R | sed -e"$temp1"`
+      $LINK $NEWFLAG $FREE_FORM f90vsplit.f -o f90vsplit
+      mv ./f90vsplit Vrelease
+      rm -f split *.mod
+      rm -f $MY_HOME/f90vsplit
+      cd Vrelease
+      PWD=`pwd`
+      ln -s $PWD/f90vsplit $MY_HOME/f90vsplit
+      cd ..
+   fi
+fi
+
+#Go into TEMP_DIR
+cd ./$TEMP_DIR
+
+echo "  Concatenate source files"
+
+rm -f vsource.f
+combine=""
+cfiles=""
+case $files in
+lib)
+	combine="fftpack.f svdpack.f miscel.f coilslib.f leven_marq.f lsode.f \
+	multiprocess.f ga_optim.f de_optim.f fort_lapack.f legendre.f leg_splines.f"
+	cfiles="cfuns.c"
+	;;
+vmec)
+	combine="meq.f blasetc.f vvacuum.f reconstruct.f splines.f"
+	;;
+vmec2000)
+	combine="meq.f blasetc.f vvacuum.f reconstruct.f splines.f"
+	;;
+makegrid)
+	combine="makegrid.f"
+	;;
+stellopt)
+	combine="voptimize.f"
+	;;
+booz_xform) 
+	combine="vbooz.f"
+	;;	
+cobra)	
+	combine="cobra_source.f cobra_lib.f"
+	;;
+cobravmec)	
+	combine="cobra_source.f cobra_lib.f"
+        ;;
+coilopt4)	
+	combine="driver.f coilopt4.f"
+        ;;
+coilgeom)	
+	combine="driver.f coilopt4.f"
+        ;;
+diagno) 
+	combine="vdiagno.f"
+	;;	
+dkes)	
+	combine="dkes.f dkes_input_prepare.f"
+	;;
+j_invariant)
+	combine="jinvar.f"
+	;;
+neo)
+        combine="neogroup.f"
+        ;;
+nescoil) 
+	combine="driver.f nescoil.f"
+	;;
+bnorm)
+	combine="bnorm.f"
+	;;		
+bootsj)
+	combine="bootsj.f"
+	;;		
+#btrace) 
+#	combine="vbtrace.f"
+#	;;	
+prout)
+	combine="prout.f ncarplts1.f"
+	;;
+pgprout)
+	combine="pgprout.f pgxtalpkg.f"
+	cfiles="fort_setenv.c"
+	;;
+bd_match)
+	combine="bd_match.f"
+	cfiles="fort_setenv.c"
+	;;
+esac
+
+cat -s $combine > vsource.f
+
+#Return to parent directory from TEMP_DIR
+cd ..
+
+#Copy files to appropriate directories (only if they differ from existing files)
+#Do all the work from TEMP_DIR/tmp
+for dir_files in vsource vmodules
+do
+  if [ ! -d ./$dir_files ]
+  then
+    echo "  Creating new directory '"$dir_files"'"
+    $MKDIR ./$dir_files
+  fi
+
+  filename=$dir_files.f
+
+#move to TEMP_DIR and make directory tmp
+  cd ./$TEMP_DIR
+
+  if [ -f ./vmodules_coils.f ] && [ -f ./vmodules.f ]
+  then
+    cat -s vmodules_coils.f >> vmodules.f
+    rm -f vmodules_coils.f
+  fi
+
+  if [ -f ./vmodules_ajax.f ] && [ -f ./vmodules.f ]
+  then
+    cat -s vmodules_ajax.f >> vmodules.f
+    rm -f vmodules_ajax.f
+  fi
+
+  if [ ! -f $filename ]
+  then
+     echo "  ================================================================="
+     echo "  "$filename" not found in "$DIR": VMEC could not update "$files
+     echo "  ================================================================="
+     continue 2
+  fi        
+
+  [ ! -d ./tmp ] && $MKDIR ./tmp
+  cd ./tmp
+ 
+  for modified_files in $filename $cfiles
+  do
+    [ -f ../$modified_files ] && mv -f ../$modified_files .
+  done  
+
+#Eventually save this lst file for sed...
+  $MY_HOME/f90vsplit < $filename >> $filename.lst
+  rm -f $filename nul zzz*.f
+  
+  
+#Compare new .f (and .c) files with existing ones; only replace if different
+  echo "  *********************************"
+  echo "  Updating  source files in ../$dir_files"
+  NEWDIR=`pwd`
+  for compfile in *.f *.c *.h
+  do
+     if [ $compfile = "*.f" ] || [ $compfile = "*.c" ] || [ $compfile = "*.h" ]
+     then
+        continue
+     elif cmp -s $compfile ../../$dir_files/$compfile
+     then
+        continue
+     elif [ -f $compfile ]
+     then
+        echo "  Updating $compfile"
+        ls $compile > /dev/null && cp $compfile ../../$dir_files
+     else
+        continue
+     fi
+  done
+
+#Check if file in old source or module director ($dir_files) exists in the new directory; if not, delete it  
+#Delete .o, .mod files too
+  cd ../../$dir_files
+  for compfile in *.f *.c *.h
+  do
+    if [ ! -f $NEWDIR/$compfile ] && [ $compfile != "*.f" ] && [ $compfile != "*.c" ] && [ $compfile != "*.h" ]
+    then
+       rm -f ./$compfile
+       rm -f ../Vrelease/$compfile;  rm -f ../Vdebug/$compfile
+       other_ext=`echo $compfile | sed -e's;.f$;;' -e's;.o$;;' -e's;.h$;;'`
+       fileo=$other_ext".o";      filem=$other_ext".mod"
+       echo "Removing old files: "$compfile
+       rm -f ../Vrelease/$fileo;   rm -f ../Vrelease/$filem
+       rm -f ../Vdebug/$fileo;     rm -f ../Vdebug/$filem
+    fi 
+  done
+  cd $NEWDIR  
+  
+#Generate object listing file for makefile (Release and Debug versions)
+#Change FILE.f => FILE.o and append a backslash EXCEPT to the last line
+#Module files ($module_files) MUST go first so they get compiled first 
+#(other subroutines may USE them)
+  filesub=$dir_files.Sub
+  echo $filesub = \\ > $dir_files.lst
+  cat -s $filename.lst >> $dir_files.lst
+  cat $dir_files.lst | sed -e's;\.f;\.o \\;' -e'$ s;\.o \\;\.o;' >> $dir_files.lst1
+  mv -f $dir_files.lst1 ../../$LISTS/$dir_files.lst
+  rm -f *.*
+
+#return to top level directory from TEMP_DIR/tmp
+  cd ../..
+
+#end for dir_files in vsource vmodules
+done
+
+#move input demo files for storage
+if [ $files = "vmec" ] || [ $files = "vmec2000" ]
+then
+  echo "  Storing VMEC input demonstration files"
+  mv -f ./$TEMP_DIR/input.* .
+fi
+
+echo "  Cleaning up temporary files..."
+rm -fr ./$TEMP_DIR
+
+cp $MAKEFILE ./Vdebug
+mv -f $MAKEFILE ./Vrelease
+
+#return to top level directory (from which vmec_setup was called)
+cd ..    
+
+echo 
+echo "  $files directory tree completed"
+echo "  Type make release (debug) to make a release (debug) version of $files"
+echo "  ======================================================================="
+echo "  IMPORTANT: For system calls to work correctly (from the optimizer) ,"
+echo "  be sure to symbolically link all spawnable subprocessess (executables)"
+echo "  to the \$MY_HOME directory as follows:"
+echo "           cd \$MY_HOME"
+echo "           ln -s ABSOLUTE_PATH_TO_EXECUTABLE/executable_name ."
+echo " "
+echo "  NOTE: \$MY_HOME MUST be in your path for this to work properly!"
+echo "  End $files creation loop"
+echo "  ======================================================================="
+echo 
+
+#Create symbolic links to library archives and put in $MY_HOME directory
+if [ $files = "lib" ]
+then
+  if [ -d ./LIB_OPT ]
+  then
+    rm -f $MY_HOME/vmec_lib_release
+    rm -f $MY_HOME/vmec_lib_debug
+    cd ./LIB_OPT
+    PWD=`pwd`
+    ln -s $PWD/Vrelease $MY_HOME/vmec_lib_release
+    ln -s $PWD/Vdebug $MY_HOME/vmec_lib_debug
+    if [ $CLEAN = "clean" ]
+    then 
+      make clean_$VERSION
+    else     
+      make $VERSION
+    fi
+    cd ..
+  else
+    echo "  Could not find optimization library - executables will not link!"
+  fi      
+
+else
+# run individual makefiles (Note: libstopt.a had to be created first for this to work)
+  if [ -d ./$DIR ]
+  then
+    cd ./$DIR
+    if [ $CLEAN = "clean" ]
+    then
+       make clean_$VERSION
+    else
+       make $VERSION
+    fi
+#   return to original directory
+    cd ..
+  fi
+fi
+
+#end for-do loop over files_to_make  
+done

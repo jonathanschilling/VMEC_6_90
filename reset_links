@@ -1,0 +1,55 @@
+#!/bin/sh
+#
+#  this script re-connects the links to the executables in the VMEC directories
+#
+
+MY_HOME=$HOME/bin
+
+#Set Ext_Distrib  = 1 for externally distributed libstopt.a library
+#User only needs (and gets) vmec_auxmod modules file in this case
+
+Ext_Distrib=0
+
+echo 'Enter version to link (release-R, debug-D) : \c'
+read v_in
+input=`echo $v_in | tr 'a-z' 'A-Z'`
+if [ $input = 'D' ]
+then
+   VERSION="debug"
+else
+   VERSION="release"
+fi      
+
+echo 'Specify module(s) to link: (all booz_xform bootsj bnorm cobra cobravmec coilgeom coilopt dkes'
+echo 'j_invariant grid neo nescoil prout pgprout stellopt vmec vmec2000): \c'
+read v_in
+files_to_make=`echo $v_in | tr 'A-Z' 'a-z'`
+if [ $files_to_make = 'all' ]
+then
+   files_to_make="booz_xform bootsj bnorm cobra cobravmec coilgeom coilopt4 dkes j_invariant grid neo nescoil \
+   prout pgprout vmec vmec2000 stellopt"
+  rm -f $HOME/bin/vmec_lib
+  ln -s $PWD/LIB_OPT/V$VERSION $HOME/bin/vmec_lib
+fi   
+
+
+for files in $files_to_make
+do
+  DIR=`echo $files | tr 'a-z' 'A-Z'`
+  if [ $files = vmec ]
+  then
+      DIR="VMEC_CODE"
+  elif [ $files = prout ]
+  then
+      DIR="PLOTTER"
+  elif [ $files = grid ]
+  then
+      DIR="MAKEGRID"
+  fi
+
+  if [ -e $DIR/V$VERSION/x$files ]
+  then
+    rm -f $HOME/bin/x$files
+    ln -s $PWD/$DIR/V$VERSION/x$files $HOME/bin/x$files
+  fi
+done
