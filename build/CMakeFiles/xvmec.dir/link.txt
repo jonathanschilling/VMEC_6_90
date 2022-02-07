@@ -1,0 +1,1 @@
+/usr/bin/gfortran  -fallow-argument-mismatch -cpp CMakeFiles/xvmec.dir/src/vmec2000/meq.f.o -o bin/xvmec  lib/libvmec.a /usr/lib/libnetcdf.so /usr/lib/libnetcdff.so 
